@@ -1,0 +1,15 @@
+app:
+  environment: "development"
+
+database:
+  url: "postgresql://user:pass@localhost:5432/facedb"
+
+face_detection:
+  model_type: "retinaface" 
+  model_path: "models/retinaface-resnet50.onnx"
+
+face_recognition:
+  model_type: "mobilefacenet" 
+  model_path: "models/mobilefacenet.onnx"
+  threshold: 0.45
+
