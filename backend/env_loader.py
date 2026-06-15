@@ -4,15 +4,24 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 def load_selected_env(project_root: Path = None):
+
+    BASE_DIR = Path(__file__).resolve().parent
+
+    # 2. Aponta exatamente para o arquivo .env nessa pasta
+    # ENV_PATH = BASE_DIR / ".env"
+
+    env_path = BASE_DIR / '.env'
+
+
     """
     Procura e carrega as variáveis de ambiente do arquivo .env
     para a memória do sistema (os.environ).
     """
     # Se não for passado um diretório raiz, assume o diretório atual deste arquivo
-    if project_root is None:
-        project_root = Path(__file__).resolve().parent
+    # if project_root is None:
+    #     project_root = Path(__file__).resolve().parent
         
-    env_path = project_root / '.env'
+    # env_path = project_root / '.env'
     
     if env_path.exists():
         # Carrega o arquivo .env substituindo variáveis já existentes (override=True)
