@@ -16,6 +16,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pathlib import Path
 from sqlalchemy import text # Necessário para rodar queries diretas do pgvector
 
+from app.database import RostoDB, UsuarioDB
+from app.config import settings
+
+
 # Carrega as variáveis de ambiente
 from env_loader import load_selected_env
 load_selected_env(project_root=Path(__file__).resolve().parent)
@@ -28,6 +32,7 @@ from app.database import SessionLocal
 # Lembre-se de verificar se a classe dentro do arquivo se chama realmente 'MobileFaceNet' e 'FaceDetector'
 from app.services.mobilefacenet import MobileFaceNetExtractor
 from app.services.detector import FaceDetector
+from app.services.liveness_detector import FaceLivenessDetector
 
 MODEL_FOLDER = os.getenv("MODEL_FOLDER", "models")
 # Alterado para o nome exato do arquivo que aparece no seu print
@@ -36,6 +41,8 @@ FACE_MODEL_NAME = "mobilefacenet.onnx"
 # Instâncias globais
 face_extractor = None
 face_detector = FaceDetector()
+
+face_liveness = FaceLivenessDetector(threshold=settings.face_liveness_threshold) # <--- NOVO
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -63,53 +70,61 @@ live_face_app = FastAPI(title="IAVision Face Live", lifespan=lifespan)
 _infer_executor = ThreadPoolExecutor(max_workers=1)
 _db_executor = ThreadPoolExecutor(max_workers=2)
 
-def _process_face_frame(frame: np.ndarray, detector, extractor) -> list[float] | None:
+def _process_face_frame(frame: np.ndarray, detector, liveness, extractor) -> tuple[list[float] | None, dict]:
     """
-    Executa a detecção do rosto e a extração do embedding.
+    1. Corta o rosto
+    2. Valida Liveness (Prova de Vida)
+    3. Extrai o embedding (apenas se for real)
     """
     try:
-        # 1. O PASSO QUE FALTAVA: Corta o rosto da imagem bruta
         imagem_rosto = detector.get_face_crop(frame)
     except ValueError:
-        # Se não detectar ninguém na câmera neste frame, aborta silenciosamente
-        return None
+        return None, {"is_real": False, "score": 0.0}
 
-    # 2. Extrai o vetor apenas do rosto focado
+    # Avalia se a imagem é de uma pessoa viva ou de uma foto/tela
+    liveness_result = liveness.evaluate(imagem_rosto)
+    
+    # Se for fraude/spoofing, abortamos aqui. Não extrai vetor.
+    if not liveness_result["is_real"]:
+        return None, liveness_result
+
+    # Só extrai o vetor se a pessoa for real
     embedding = extractor.extract_embedding(imagem_rosto)
     
     if embedding is not None:
         if isinstance(embedding, np.ndarray):
-            return embedding.flatten().tolist()
-        return embedding
-    return None
+            return embedding.flatten().tolist(), liveness_result
+        return embedding, liveness_result
+        
+    return None, liveness_result
+
 
 def _query_closest_face(embedding: list[float]) -> dict | None:
-    """
-    Executa a busca vetorial (pgvector) no banco de dados Postgres.
-    """
     db = SessionLocal()
     try:
-        # Trocamos :emb::vector por CAST(:emb AS vector) para evitar o conflito de sintaxe
-        sql = text("""
-            SELECT id, nome, 1 - (embedding <=> CAST(:emb AS vector)) AS confidence
-            FROM rostos
-            WHERE 1 - (embedding <=> CAST(:emb AS vector)) > 0.6
-            ORDER BY confidence DESC
-            LIMIT 1
-        """)
-        
-        # Converte a lista do Python para uma string no formato do PostgreSQL ex: '[0.1, 0.2, ...]'
-        emb_str = str(embedding)
-        
-        result = db.execute(sql, {"emb": emb_str}).fetchone()
-        
-        if result:
-            return {
-                "id": str(result.id),
-                "nome": result.nome,
-                "confidence": round(result.confidence, 3)
-            }
+        # Busca o vetor mais próximo na tabela de rostos
+        rosto_mais_proximo = db.query(RostoDB)\
+            .order_by(RostoDB.embedding.cosine_distance(embedding))\
+            .first()
+
+        if not rosto_mais_proximo:
+            return None
+
+        # Calcula a distância desse vetor
+        distancia = db.query(
+            RostoDB.embedding.cosine_distance(embedding)
+        ).filter(RostoDB.id == rosto_mais_proximo.id).scalar()
+
+        if distancia <= settings.threshold:
+            # A GRANDE MUDANÇA: Retornamos os dados do USUÁRIO dono daquela face
+            usuario_dono = rosto_mais_proximo.usuario
             
+            return {
+                "id": str(usuario_dono.id), # ID único da pessoa
+                "nome": usuario_dono.nome,  # Nome da pessoa
+                "confidence": round(1.0 - float(distancia), 4)
+            }
+        
         return None
     finally:
         db.close()
@@ -146,20 +161,38 @@ async def face_recognition_websocket(websocket: WebSocket):
             resultado = None
 
             try:
-                # 1. Extrai o embedding do rosto
-                embedding = await loop.run_in_executor(
-                    _infer_executor, _process_face_frame, frame, face_detector, face_extractor
+                # Extrai o embedding E o status de liveness simultaneamente
+                embedding, liveness_status = await loop.run_in_executor(
+                    _infer_executor, _process_face_frame, frame, face_detector, face_liveness, face_extractor
                 )
+                
+                
+                # Se detectou um rosto e passou no teste de vida, vai pro banco!
                 if embedding is not None:
                     face_detected = True
-                    # 2. Busca o dono do rosto no banco
                     resultado = await loop.run_in_executor(
                         _db_executor, _query_closest_face, embedding
                     )
+                # Se detectou rosto, mas é uma foto/fraude (Liveness falhou)
+                elif liveness_status["score"] > 0.0 and not liveness_status["is_real"]:
+                    face_detected = True
+                    resultado = None # Barramos a busca no banco
+
             except Exception as inner_exc:
-                # Se der erro na IA ou no Banco, logamos mas NÃO fechamos o WebSocket
                 logging.error(f"Erro ao processar frame/banco: {inner_exc}")
+                liveness_status = {"is_real": False, "score": 0.0}
                 resultado = None
+
+            inference_ms = int((time.perf_counter() - t0) * 1000)
+            busy = False
+
+            # O JSON agora carrega o status antifraude para o Frontend brilhar!
+            await websocket.send_text(json.dumps({
+                "face_detected": face_detected,
+                "liveness": liveness_status, # Ex: {"is_real": True, "score": 0.98}
+                "match": resultado,
+                "inference_ms": inference_ms
+            }))
 
             inference_ms = int((time.perf_counter() - t0) * 1000)
             busy = False

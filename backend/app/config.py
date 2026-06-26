@@ -21,6 +21,10 @@ class Settings:
     @property
     def threshold(self) -> float:
         return float(self._config["face_recognition"]["threshold"])
+    
+    @property
+    def face_liveness_threshold(self) -> float:
+        return float(self._config["face_liveness"]["threshold"])
 
 # Instância global configurada
 settings = Settings()

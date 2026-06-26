@@ -13,3 +13,7 @@ face_recognition:
   model_path: "models/mobilefacenet.onnx"
   threshold: 0.45
 
+face_liveness:
+  model_type: "minifasnet_v2" 
+  model_path: "models/minifasnet_v2.onnx"
+  threshold: 0.90

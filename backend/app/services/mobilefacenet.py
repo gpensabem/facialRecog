@@ -3,10 +3,6 @@ import cv2
 import numpy as np
 from app.core.interfaces import FaceExtractorInterface
 
-import onnxruntime as ort
-import cv2
-import numpy as np
-from app.core.interfaces import FaceExtractorInterface
 
 class MobileFaceNetExtractor(FaceExtractorInterface):
     def __init__(self, model_path: str):

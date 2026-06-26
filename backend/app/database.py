@@ -25,12 +25,39 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import relationship
+from pgvector.sqlalchemy import Vector
+from app.database import Base # Ajuste para o seu import real
+
+class UsuarioDB(Base):
+    __tablename__ = "usuarios"
+
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String(255), nullable=False)
+    # Aqui pode entrar CPF, email, etc.
+
+    # Relacionamento: Um usuário tem várias faces
+    faces = relationship("RostoDB", back_populates="usuario", cascade="all, delete-orphan")
+
 class RostoDB(Base):
     __tablename__ = "rostos"
 
     id = Column(Integer, primary_key=True, index=True)
-    nome = Column(String(100), nullable=False)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
+    
+    # O tamanho (ex: 128) depende do seu extrator
     embedding = Column(Vector(128)) 
+
+    # Relacionamento reverso
+    usuario = relationship("UsuarioDB", back_populates="faces")
+
+# class RostoDB(Base):
+#     __tablename__ = "rostos"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     nome = Column(String(100), nullable=False)
+#     embedding = Column(Vector(128)) 
 
 def get_db():
     db = SessionLocal()
